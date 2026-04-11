@@ -56,6 +56,21 @@ class TestSettings:
 
         assert NVIDIA_NIM_BASE_URL == "https://integrate.api.nvidia.com/v1"
 
+    def test_nvidia_nim_base_url_default(self):
+        """NVIDIA_NIM_BASE_URL defaults to the NIM API endpoint."""
+        from config.settings import Settings
+
+        settings = Settings()
+        assert settings.nvidia_nim_base_url == "https://integrate.api.nvidia.com/v1"
+
+    def test_nvidia_nim_base_url_from_env(self, monkeypatch):
+        """NVIDIA_NIM_BASE_URL env var overrides the default."""
+        from config.settings import Settings
+
+        monkeypatch.setenv("NVIDIA_NIM_BASE_URL", "http://custom-nim:9999/v1")
+        settings = Settings()
+        assert settings.nvidia_nim_base_url == "http://custom-nim:9999/v1"
+
     def test_lm_studio_base_url_from_env(self, monkeypatch):
         """LM_STUDIO_BASE_URL env var is loaded into settings."""
         from config.settings import Settings

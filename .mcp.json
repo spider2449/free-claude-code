@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "duckduckgo": {
+      "command": "npx",
+      "args": ["-y", "@duckduckgo/mcp-server"]
+    }
+  }
+}

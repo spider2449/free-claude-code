@@ -10,7 +10,7 @@ from providers.common import get_user_facing_error_message
 from providers.exceptions import AuthenticationError
 from providers.llamacpp import LlamaCppProvider
 from providers.lmstudio import LMStudioProvider
-from providers.nvidia_nim import NVIDIA_NIM_BASE_URL, NvidiaNimProvider
+from providers.nvidia_nim import NvidiaNimProvider
 from providers.open_router import OPENROUTER_BASE_URL, OpenRouterProvider
 
 # Provider registry: keyed by provider type string, lazily populated
@@ -32,7 +32,7 @@ def _create_provider_for_type(provider_type: str, settings: Settings) -> BasePro
             )
         config = ProviderConfig(
             api_key=settings.nvidia_nim_api_key,
-            base_url=NVIDIA_NIM_BASE_URL,
+            base_url=settings.nvidia_nim_base_url,
             rate_limit=settings.provider_rate_limit,
             rate_window=settings.provider_rate_window,
             max_concurrency=settings.provider_max_concurrency,

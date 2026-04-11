@@ -35,6 +35,10 @@ class Settings(BaseSettings):
 
     # ==================== NVIDIA NIM Config ====================
     nvidia_nim_api_key: str = ""
+    nvidia_nim_base_url: str = Field(
+        default="https://integrate.api.nvidia.com/v1",
+        validation_alias="NVIDIA_NIM_BASE_URL",
+    )
 
     # ==================== LM Studio Config ====================
     lm_studio_base_url: str = Field(
