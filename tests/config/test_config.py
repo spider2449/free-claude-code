@@ -30,7 +30,7 @@ class TestSettings:
         assert isinstance(settings.nim.temperature, float)
         assert isinstance(settings.fast_prefix_detection, bool)
         assert isinstance(settings.enable_thinking, bool)
-        assert settings.http_read_timeout == 120.0
+        assert settings.http_read_timeout == 300.0
 
     def test_get_settings_cached(self):
         """Test get_settings returns cached instance."""
