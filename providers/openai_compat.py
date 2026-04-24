@@ -44,6 +44,17 @@ class OpenAICompatibleProvider(BaseProvider):
             rate_window=config.rate_window,
             max_concurrency=config.max_concurrency,
         )
+        http_client = None
+        if config.proxy:
+            http_client = httpx.AsyncClient(
+                proxy=config.proxy,
+                timeout=httpx.Timeout(
+                    config.http_read_timeout,
+                    connect=config.http_connect_timeout,
+                    read=config.http_read_timeout,
+                    write=config.http_write_timeout,
+                ),
+            )
         self._client = AsyncOpenAI(
             api_key=self._api_key,
             base_url=self._base_url,
@@ -54,6 +65,7 @@ class OpenAICompatibleProvider(BaseProvider):
                 read=config.http_read_timeout,
                 write=config.http_write_timeout,
             ),
+            http_client=http_client,
         )
 
     async def cleanup(self) -> None:
@@ -66,9 +78,32 @@ class OpenAICompatibleProvider(BaseProvider):
     def _build_request_body(self, request: Any) -> dict:
         """Build request body. Must be implemented by subclasses."""
 
-    def _handle_extra_reasoning(self, delta: Any, sse: SSEBuilder) -> Iterator[str]:
+    def _handle_extra_reasoning(
+        self, delta: Any, sse: SSEBuilder, *, thinking_enabled: bool
+    ) -> Iterator[str]:
         """Hook for provider-specific reasoning (e.g. OpenRouter reasoning_details)."""
         return iter(())
+
+    def _get_retry_request_body(self, error: Exception, body: dict) -> dict | None:
+        """Return a modified request body for one retry, or None."""
+        return None
+
+    async def _create_stream(self, body: dict) -> tuple[Any, dict]:
+        """Create a streaming chat completion, optionally retrying once."""
+        try:
+            stream = await self._global_rate_limiter.execute_with_retry(
+                self._client.chat.completions.create, **body, stream=True
+            )
+            return stream, body
+        except Exception as error:
+            retry_body = self._get_retry_request_body(error, body)
+            if retry_body is None:
+                raise
+
+            stream = await self._global_rate_limiter.execute_with_retry(
+                self._client.chat.completions.create, **retry_body, stream=True
+            )
+            return stream, retry_body
 
     def _process_tool_call(self, tc: dict, sse: SSEBuilder) -> Iterator[str]:
         """Process a single tool call delta and yield SSE events."""
@@ -151,6 +186,7 @@ class OpenAICompatibleProvider(BaseProvider):
 
         think_parser = ThinkTagParser()
         heuristic_parser = HeuristicToolParser()
+        thinking_enabled = self._is_thinking_enabled(request)
 
         finish_reason = None
         usage_info = None
@@ -159,9 +195,7 @@ class OpenAICompatibleProvider(BaseProvider):
 
         async with self._global_rate_limiter.concurrency_slot():
             try:
-                stream = await self._global_rate_limiter.execute_with_retry(
-                    self._client.chat.completions.create, **body, stream=True
-                )
+                stream, body = await self._create_stream(body)
                 async for chunk in stream:
                     if getattr(chunk, "usage", None):
                         usage_info = chunk.usage
@@ -180,19 +214,25 @@ class OpenAICompatibleProvider(BaseProvider):
 
                     # Handle reasoning_content (OpenAI extended format)
                     reasoning = getattr(delta, "reasoning_content", None)
-                    if reasoning:
+                    if thinking_enabled and reasoning:
                         for event in sse.ensure_thinking_block():
                             yield event
                         yield sse.emit_thinking_delta(reasoning)
 
                     # Provider-specific extra reasoning (e.g. OpenRouter reasoning_details)
-                    for event in self._handle_extra_reasoning(delta, sse):
+                    for event in self._handle_extra_reasoning(
+                        delta,
+                        sse,
+                        thinking_enabled=thinking_enabled,
+                    ):
                         yield event
 
                     # Handle text content
                     if delta.content:
                         for part in think_parser.feed(delta.content):
                             if part.type == ContentType.THINKING:
+                                if not thinking_enabled:
+                                    continue
                                 for event in sse.ensure_thinking_block():
                                     yield event
                                 yield sse.emit_thinking_delta(part.content)
@@ -248,12 +288,16 @@ class OpenAICompatibleProvider(BaseProvider):
                 logger.error("{}_ERROR:{} {}: {}", tag, req_tag, type(e).__name__, e)
                 mapped_e = map_error(e)
                 error_occurred = True
-                error_message = append_request_id(
-                    get_user_facing_error_message(
+                if getattr(mapped_e, "status_code", None) == 405:
+                    base_message = (
+                        f"Upstream provider {tag} rejected the request method "
+                        "or endpoint (HTTP 405)."
+                    )
+                else:
+                    base_message = get_user_facing_error_message(
                         mapped_e, read_timeout_s=self._config.http_read_timeout
-                    ),
-                    request_id,
-                )
+                    )
+                error_message = append_request_id(base_message, request_id)
                 logger.info(
                     "{}_STREAM: Emitting SSE error event for {}{}",
                     tag,
@@ -269,10 +313,13 @@ class OpenAICompatibleProvider(BaseProvider):
         remaining = think_parser.flush()
         if remaining:
             if remaining.type == ContentType.THINKING:
-                for event in sse.ensure_thinking_block():
-                    yield event
-                yield sse.emit_thinking_delta(remaining.content)
-            else:
+                if not thinking_enabled:
+                    remaining = None
+                else:
+                    for event in sse.ensure_thinking_block():
+                        yield event
+                    yield sse.emit_thinking_delta(remaining.content)
+            if remaining and remaining.type == ContentType.TEXT:
                 for event in sse.ensure_text_block():
                     yield event
                 yield sse.emit_text_delta(remaining.content)

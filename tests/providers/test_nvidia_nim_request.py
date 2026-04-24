@@ -9,6 +9,7 @@ from providers.common.utils import set_if_not_none
 from providers.nvidia_nim.request import (
     _set_extra,
     build_request_body,
+    clone_body_without_chat_template,
 )
 
 
@@ -67,21 +68,21 @@ class TestBuildRequestBody:
     def test_max_tokens_capped_by_nim(self, req):
         req.max_tokens = 100000
         nim = NimSettings(max_tokens=4096)
-        body = build_request_body(req, nim)
+        body = build_request_body(req, nim, thinking_enabled=True)
         assert body["max_tokens"] == 4096
 
     def test_presence_penalty_included_when_nonzero(self, req):
         nim = NimSettings(presence_penalty=0.5)
-        body = build_request_body(req, nim)
+        body = build_request_body(req, nim, thinking_enabled=True)
         assert body["presence_penalty"] == 0.5
 
     def test_include_stop_str_in_output_not_sent(self, req):
-        body = build_request_body(req, NimSettings())
+        body = build_request_body(req, NimSettings(), thinking_enabled=True)
         assert "include_stop_str_in_output" not in body.get("extra_body", {})
 
     def test_parallel_tool_calls_included(self, req):
         nim = NimSettings(parallel_tool_calls=False)
-        body = build_request_body(req, nim)
+        body = build_request_body(req, nim, thinking_enabled=True)
         assert body["parallel_tool_calls"] is False
 
     def test_reasoning_params_in_extra_body(self):
@@ -98,14 +99,41 @@ class TestBuildRequestBody:
         req.extra_body = None
         req.top_k = None
 
-        nim = NimSettings(enable_thinking=True)
-        body = build_request_body(req, nim)
+        nim = NimSettings()
+        body = build_request_body(req, nim, thinking_enabled=True)
         extra = body["extra_body"]
         assert extra["chat_template_kwargs"] == {
             "thinking": True,
             "enable_thinking": True,
+            "reasoning_budget": body["max_tokens"],
         }
-        assert extra["reasoning_budget"] == body["max_tokens"]
+        assert "reasoning_budget" not in extra
+
+    def test_clone_body_without_chat_template(self):
+        body = {
+            "model": "test",
+            "extra_body": {
+                "chat_template": "custom_template",
+                "chat_template_kwargs": {
+                    "thinking": True,
+                    "enable_thinking": True,
+                    "reasoning_budget": 100,
+                },
+                "ignore_eos": False,
+            },
+        }
+
+        cloned = clone_body_without_chat_template(body)
+
+        assert cloned is not None
+        assert "chat_template" not in cloned["extra_body"]
+        assert cloned["extra_body"]["chat_template_kwargs"] == {
+            "thinking": True,
+            "enable_thinking": True,
+            "reasoning_budget": 100,
+        }
+        assert cloned["extra_body"]["ignore_eos"] is False
+        assert body["extra_body"]["chat_template"] == "custom_template"
 
     def test_no_chat_template_kwargs_when_thinking_disabled(self):
         req = MagicMock()
@@ -121,11 +149,58 @@ class TestBuildRequestBody:
         req.extra_body = None
         req.top_k = None
 
-        nim = NimSettings(enable_thinking=False)
-        body = build_request_body(req, nim)
+        nim = NimSettings()
+        body = build_request_body(req, nim, thinking_enabled=False)
         extra = body.get("extra_body", {})
         assert "chat_template_kwargs" not in extra
         assert "reasoning_budget" not in extra
+
+    def test_reasoning_budget_respects_existing_chat_template_kwargs(self):
+        req = MagicMock()
+        req.model = "test"
+        req.messages = [MagicMock(role="user", content="hi")]
+        req.max_tokens = 100
+        req.system = None
+        req.temperature = None
+        req.top_p = None
+        req.stop_sequences = None
+        req.tools = None
+        req.tool_choice = None
+        req.top_k = None
+        req.extra_body = {
+            "chat_template_kwargs": {"enable_thinking": False, "custom": "value"}
+        }
+
+        body = build_request_body(req, NimSettings(), thinking_enabled=True)
+        assert body["extra_body"]["chat_template_kwargs"] == {
+            "enable_thinking": False,
+            "custom": "value",
+            "reasoning_budget": body["max_tokens"],
+        }
+
+    def test_chat_template_fields_present_for_mistral_model(self):
+        req = MagicMock()
+        req.model = "mistralai/mixtral-8x7b-instruct-v0.1"
+        req.messages = [MagicMock(role="user", content="hi")]
+        req.max_tokens = 100
+        req.system = None
+        req.temperature = None
+        req.top_p = None
+        req.stop_sequences = None
+        req.tools = None
+        req.tool_choice = None
+        req.extra_body = None
+        req.top_k = None
+
+        nim = NimSettings(chat_template="custom_template")
+        body = build_request_body(req, nim, thinking_enabled=True)
+        extra = body.get("extra_body", {})
+        assert extra["chat_template_kwargs"] == {
+            "thinking": True,
+            "enable_thinking": True,
+            "reasoning_budget": body["max_tokens"],
+        }
+        assert extra["chat_template"] == "custom_template"
 
     def test_no_reasoning_params_in_extra_body(self):
         req = MagicMock()
@@ -142,7 +217,7 @@ class TestBuildRequestBody:
         req.top_k = None
 
         nim = NimSettings()
-        body = build_request_body(req, nim)
+        body = build_request_body(req, nim, thinking_enabled=False)
         extra = body.get("extra_body", {})
         for param in (
             "thinking",
@@ -152,3 +227,29 @@ class TestBuildRequestBody:
             "reasoning_effort",
         ):
             assert param not in extra
+
+    def test_assistant_thinking_blocks_removed_when_disabled(self):
+        req = MagicMock()
+        req.model = "test"
+        req.messages = [
+            MagicMock(
+                role="assistant",
+                content=[
+                    MagicMock(type="thinking", thinking="secret"),
+                    MagicMock(type="text", text="answer"),
+                ],
+            )
+        ]
+        req.max_tokens = 100
+        req.system = None
+        req.temperature = None
+        req.top_p = None
+        req.stop_sequences = None
+        req.tools = None
+        req.tool_choice = None
+        req.extra_body = None
+        req.top_k = None
+
+        body = build_request_body(req, NimSettings(), thinking_enabled=False)
+        assert "<think>" not in body["messages"][0]["content"]
+        assert "answer" in body["messages"][0]["content"]

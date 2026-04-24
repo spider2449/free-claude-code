@@ -79,6 +79,27 @@ def test_convert_tools():
     assert result[1]["function"]["description"] == ""  # Check default empty string
 
 
+@pytest.mark.parametrize(
+    "tool_choice,expected",
+    [
+        (
+            {"type": "tool", "name": "echo_smoke"},
+            {"type": "function", "function": {"name": "echo_smoke"}},
+        ),
+        ({"type": "any"}, "required"),
+        ({"type": "auto"}, "auto"),
+        ({"type": "none"}, "none"),
+        (
+            {"type": "function", "function": {"name": "already_openai"}},
+            {"type": "function", "function": {"name": "already_openai"}},
+        ),
+    ],
+)
+def test_convert_tool_choice(tool_choice, expected):
+    result = AnthropicToOpenAIConverter.convert_tool_choice(tool_choice)
+    assert result == expected
+
+
 # --- Message Conversion Tests: User ---
 
 
@@ -197,6 +218,24 @@ def test_convert_assistant_message_thinking_include_reasoning_for_openrouter():
     assert len(result) == 1
     assert result[0]["reasoning_content"] == "I need to calculate this."
     assert "<think>" in result[0]["content"]
+
+
+def test_convert_assistant_message_thinking_removed_when_disabled():
+    content = [
+        MockBlock(type="thinking", thinking="I need to calculate this."),
+        MockBlock(type="text", text="The answer is 4."),
+    ]
+    messages = [MockMessage("assistant", content)]
+    result = AnthropicToOpenAIConverter.convert_messages(
+        messages,
+        include_thinking=False,
+        include_reasoning_for_openrouter=True,
+    )
+
+    assert len(result) == 1
+    assert "reasoning_content" not in result[0]
+    assert "<think>" not in result[0]["content"]
+    assert result[0]["content"] == "The answer is 4."
 
 
 def test_convert_assistant_message_tool_use():

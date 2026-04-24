@@ -1,8 +1,10 @@
 """Centralized configuration using Pydantic Settings."""
 
 import os
+from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -21,11 +23,66 @@ def _env_files() -> tuple[Path, ...]:
     return tuple(files)
 
 
+def _configured_env_files(model_config: Mapping[str, Any]) -> tuple[Path, ...]:
+    """Return the currently configured env files for Settings."""
+    configured = model_config.get("env_file")
+    if configured is None:
+        return ()
+    if isinstance(configured, (str, Path)):
+        return (Path(configured),)
+    return tuple(Path(item) for item in configured)
+
+
+def _env_file_contains_key(path: Path, key: str) -> bool:
+    """Check whether a dotenv-style file defines the given key."""
+    if not path.is_file():
+        return False
+
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.startswith("export "):
+                stripped = stripped[7:].lstrip()
+            name, sep, _value = stripped.partition("=")
+            if sep and name.strip() == key:
+                return True
+    except OSError:
+        return False
+
+    return False
+
+
+def _removed_env_var_message(model_config: Mapping[str, Any]) -> str | None:
+    """Return a migration error for removed env vars, if present."""
+    removed_key = "NIM_ENABLE_THINKING"
+    replacement = "ENABLE_THINKING"
+
+    if removed_key in os.environ:
+        return (
+            f"{removed_key} has been removed in this release. "
+            f"Rename it to {replacement}."
+        )
+
+    for env_file in _configured_env_files(model_config):
+        if _env_file_contains_key(env_file, removed_key):
+            return (
+                f"{removed_key} has been removed in this release. "
+                f"Rename it to {replacement}. Found in {env_file}."
+            )
+
+    return None
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     # ==================== OpenRouter Config ====================
     open_router_api_key: str = Field(default="", validation_alias="OPENROUTER_API_KEY")
+
+    # ==================== DeepSeek Config ====================
+    deepseek_api_key: str = Field(default="", validation_alias="DEEPSEEK_API_KEY")
 
     # ==================== Messaging Platform Selection ====================
     # Valid: "telegram" | "discord"
@@ -55,13 +112,19 @@ class Settings(BaseSettings):
     # ==================== Model ====================
     # All Claude model requests are mapped to this single model (fallback)
     # Format: provider_type/model/name
-    model: str = "nvidia_nim/meta/llama3-70b-instruct"
+    model: str = "nvidia_nim/stepfun-ai/step-3.5-flash"
 
     # Per-model overrides (optional, falls back to MODEL)
     # Each can use a different provider
     model_opus: str | None = Field(default=None, validation_alias="MODEL_OPUS")
     model_sonnet: str | None = Field(default=None, validation_alias="MODEL_SONNET")
     model_haiku: str | None = Field(default=None, validation_alias="MODEL_HAIKU")
+
+    # ==================== Per-Provider Proxy ====================
+    nvidia_nim_proxy: str = Field(default="", validation_alias="NVIDIA_NIM_PROXY")
+    open_router_proxy: str = Field(default="", validation_alias="OPENROUTER_PROXY")
+    lmstudio_proxy: str = Field(default="", validation_alias="LMSTUDIO_PROXY")
+    llamacpp_proxy: str = Field(default="", validation_alias="LLAMACPP_PROXY")
 
     # ==================== Provider Rate Limiting ====================
     provider_rate_limit: int = Field(default=40, validation_alias="PROVIDER_RATE_LIMIT")
@@ -71,10 +134,11 @@ class Settings(BaseSettings):
     provider_max_concurrency: int = Field(
         default=5, validation_alias="PROVIDER_MAX_CONCURRENCY"
     )
+    enable_thinking: bool = Field(default=True, validation_alias="ENABLE_THINKING")
 
     # ==================== HTTP Client Timeouts ====================
     http_read_timeout: float = Field(
-        default=300.0, validation_alias="HTTP_READ_TIMEOUT"
+        default=120.0, validation_alias="HTTP_READ_TIMEOUT"
     )
     http_write_timeout: float = Field(
         default=10.0, validation_alias="HTTP_WRITE_TIMEOUT"
@@ -94,9 +158,6 @@ class Settings(BaseSettings):
 
     # ==================== NIM Settings ====================
     nim: NimSettings = Field(default_factory=NimSettings)
-    nim_enable_thinking: bool = Field(
-        default=False, validation_alias="NIM_ENABLE_THINKING"
-    )
 
     # ==================== Voice Note Transcription ====================
     voice_note_enabled: bool = Field(
@@ -135,6 +196,14 @@ class Settings(BaseSettings):
         default="", validation_alias="ANTHROPIC_AUTH_TOKEN"
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_env_vars(cls, data: Any) -> Any:
+        """Fail fast when removed environment variables are still configured."""
+        if message := _removed_env_var_message(cls.model_config):
+            raise ValueError(message)
+        return data
+
     # Handle empty strings for optional string fields
     @field_validator(
         "telegram_bot_token",
@@ -144,7 +213,7 @@ class Settings(BaseSettings):
         mode="before",
     )
     @classmethod
-    def parse_optional_str(cls, v):
+    def parse_optional_str(cls, v: Any) -> Any:
         if v == "":
             return None
         return v
@@ -163,7 +232,13 @@ class Settings(BaseSettings):
     def validate_model_format(cls, v: str | None) -> str | None:
         if v is None:
             return None
-        valid_providers = ("nvidia_nim", "open_router", "lmstudio", "llamacpp")
+        valid_providers = (
+            "nvidia_nim",
+            "open_router",
+            "deepseek",
+            "lmstudio",
+            "llamacpp",
+        )
         if "/" not in v:
             raise ValueError(
                 f"Model must be prefixed with provider type. "
@@ -174,16 +249,9 @@ class Settings(BaseSettings):
         if provider not in valid_providers:
             raise ValueError(
                 f"Invalid provider: '{provider}'. "
-                f"Supported: 'nvidia_nim', 'open_router', 'lmstudio', 'llamacpp'"
+                f"Supported: 'nvidia_nim', 'open_router', 'deepseek', 'lmstudio', 'llamacpp'"
             )
         return v
-
-    @model_validator(mode="after")
-    def _inject_nim_thinking(self) -> Settings:
-        self.nim = self.nim.model_copy(
-            update={"enable_thinking": self.nim_enable_thinking}
-        )
-        return self
 
     @model_validator(mode="after")
     def check_nvidia_nim_api_key(self) -> Settings:

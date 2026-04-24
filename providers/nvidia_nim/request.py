@@ -1,5 +1,6 @@
 """Request builder for NVIDIA NIM provider."""
 
+from copy import deepcopy
 from typing import Any
 
 from loguru import logger
@@ -21,14 +22,60 @@ def _set_extra(
     extra_body[key] = value
 
 
-def build_request_body(request_data: Any, nim: NimSettings) -> dict:
+def clone_body_without_reasoning_budget(body: dict[str, Any]) -> dict[str, Any] | None:
+    """Clone a request body and strip only reasoning_budget fields."""
+    cloned_body = deepcopy(body)
+    extra_body = cloned_body.get("extra_body")
+    if not isinstance(extra_body, dict):
+        return None
+
+    removed = extra_body.pop("reasoning_budget", None) is not None
+
+    chat_template_kwargs = extra_body.get("chat_template_kwargs")
+    if (
+        isinstance(chat_template_kwargs, dict)
+        and chat_template_kwargs.pop("reasoning_budget", None) is not None
+    ):
+        removed = True
+
+    if not extra_body:
+        cloned_body.pop("extra_body", None)
+
+    if not removed:
+        return None
+
+    return cloned_body
+
+
+def clone_body_without_chat_template(body: dict[str, Any]) -> dict[str, Any] | None:
+    """Clone a request body and strip only chat_template."""
+    cloned_body = deepcopy(body)
+    extra_body = cloned_body.get("extra_body")
+    if not isinstance(extra_body, dict):
+        return None
+
+    if extra_body.pop("chat_template", None) is None:
+        return None
+
+    if not extra_body:
+        cloned_body.pop("extra_body", None)
+
+    return cloned_body
+
+
+def build_request_body(
+    request_data: Any, nim: NimSettings, *, thinking_enabled: bool
+) -> dict:
     """Build OpenAI-format request body from Anthropic request."""
     logger.debug(
         "NIM_REQUEST: conversion start model={} msgs={}",
         getattr(request_data, "model", "?"),
         len(getattr(request_data, "messages", [])),
     )
-    body = build_base_request_body(request_data)
+    body = build_base_request_body(
+        request_data,
+        include_thinking=thinking_enabled,
+    )
 
     # NIM-specific max_tokens: cap against nim.max_tokens
     max_tokens = body.get("max_tokens") or getattr(request_data, "max_tokens", None)
@@ -63,11 +110,12 @@ def build_request_body(request_data: Any, nim: NimSettings) -> dict:
     if request_extra:
         extra_body.update(request_extra)
 
-    if nim.enable_thinking:
-        extra_body.setdefault(
+    if thinking_enabled:
+        chat_template_kwargs = extra_body.setdefault(
             "chat_template_kwargs", {"thinking": True, "enable_thinking": True}
         )
-        _set_extra(extra_body, "reasoning_budget", max_tokens)
+        if isinstance(chat_template_kwargs, dict):
+            chat_template_kwargs.setdefault("reasoning_budget", max_tokens)
 
     req_top_k = getattr(request_data, "top_k", None)
     top_k = req_top_k if req_top_k is not None else nim.top_k
