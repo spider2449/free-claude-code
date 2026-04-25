@@ -1,0 +1,17 @@
+__pycache__
+.claude
+.cursor
+.pytest_cache
+.ruff_cache
+.serena
+.venv
+agent_workspace
+.env
+.env-2
+*.log
+.coverage
+llama_cache
+.smoke-results
+uv.lock
+start_server-2.bat
+start_server.bat
