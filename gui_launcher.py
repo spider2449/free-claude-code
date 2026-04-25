@@ -1,7 +1,8 @@
 """
 GUI Launcher for free-claude-code proxy.
 Edit .env settings and start the proxy server with a modern PySide6 interface.
-Supports two server profiles: Server 1 (.env) and Server 2 (.env-2).
+Supports two independent server profiles in separate tabs: Server 1 (.env) and Server 2 (.env-2).
+Each tab has its own process, settings, and console log.
 """
 
 from __future__ import annotations
@@ -212,54 +213,41 @@ FIELD_DEFS: list[tuple] = [
 ]
 
 
-# ── Main Window ──────────────────────────────────────────────────────────
-class LauncherWindow(QtWidgets.QMainWindow):
-    def __init__(self) -> None:
+# ── Server Tab ──────────────────────────────────────────────────────────────
+class ServerTab(QtWidgets.QWidget):
+    """A single tab containing settings form, process controls, and console log.
+
+    Each tab is fully independent — owns its own QProcess, field widgets,
+    and log output.
+    """
+
+    def __init__(self, profile_name: str, status_bar: QtWidgets.QStatusBar) -> None:
         super().__init__()
-        self.setWindowTitle("free-claude-code Launcher")
-        self.setMinimumSize(820, 680)
-        self.setStyleSheet(STYLESHEET)
+        self._profile_name = profile_name
+        self._env_path = PROFILES[profile_name]
+        self._status_bar = status_bar
 
         self.fields: dict[str, QtWidgets.QWidget] = {}
-        self._current_profile: str = "Server 1"
 
-        # QProcess for non-blocking subprocess management
+        # Independent QProcess per tab
         self.qprocess = QtCore.QProcess(self)
         self.qprocess.setProcessChannelMode(QtCore.QProcess.ProcessChannelMode.MergedChannels)
         self.qprocess.readyReadStandardOutput.connect(self._on_stdout)
         self.qprocess.finished.connect(self._on_finished)
 
         self._build_ui()
-        self._switch_profile("Server 1")
+        self._load_env()
 
     # ── UI Construction ──────────────────────────────────────────────
     def _build_ui(self) -> None:
-        central = QtWidgets.QWidget()
-        self.setCentralWidget(central)
-        layout = QtWidgets.QVBoxLayout(central)
-        layout.setContentsMargins(16, 12, 16, 12)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        # ── Profile selector ──
-        profile_bar = QtWidgets.QHBoxLayout()
-        profile_bar.setSpacing(10)
-
-        lbl_profile = QtWidgets.QLabel("Profile:")
-        lbl_profile.setStyleSheet("font-weight: bold; font-size: 14px;")
-
-        self.profile_combo = QtWidgets.QComboBox()
-        self.profile_combo.addItems(list(PROFILES.keys()))
-        self.profile_combo.setMinimumWidth(200)
-        self.profile_combo.currentTextChanged.connect(self._switch_profile)
-
-        self.lbl_env_file = QtWidgets.QLabel("")
-        self.lbl_env_file.setStyleSheet("color: #888; font-size: 12px;")
-
-        profile_bar.addWidget(lbl_profile)
-        profile_bar.addWidget(self.profile_combo)
-        profile_bar.addWidget(self.lbl_env_file)
-        profile_bar.addStretch()
-        layout.addLayout(profile_bar)
+        # ── Env file label ──
+        env_label = QtWidgets.QLabel(f"📄 {self._env_path}")
+        env_label.setStyleSheet("color: #888; font-size: 12px;")
+        layout.addWidget(env_label)
 
         # ── Scrollable form area ──
         scroll = QtWidgets.QScrollArea()
@@ -298,15 +286,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         btn_bar.addStretch()
         layout.addLayout(btn_bar)
 
-        # ── Log output ──
+        # ── Console log ──
         self.log = QtWidgets.QTextEdit()
         self.log.setReadOnly(True)
-        self.log.setMaximumHeight(180)
+        self.log.setMaximumHeight(200)
         layout.addWidget(self.log)
-
-        # Status bar
-        self.status = self.statusBar()
-        self.status.showMessage("Ready")
 
     def _rebuild_form(self, form_layout: QtWidgets.QVBoxLayout) -> None:
         current_group: QtWidgets.QGroupBox | None = None
@@ -339,17 +323,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
             assert current_group_layout is not None
             current_group_layout.addRow(label + ":", w)
 
-    # ── Profile switching ────────────────────────────────────────────
-    def _switch_profile(self, profile: str) -> None:
-        self._current_profile = profile
-        env_path = PROFILES[profile]
-        self.lbl_env_file.setText(str(env_path))
-        self._load_env(env_path)
-
     # ── Env I/O ──────────────────────────────────────────────────────
-    def _load_env(self, path: Path) -> None:
-        if not path.exists():
-            self.log.append(f"\u2139 {path.name} not found, starting empty")
+    def _load_env(self) -> None:
+        if not self._env_path.exists():
+            self.log.append(f"ℹ {self._env_path.name} not found, starting empty")
             for key, w in self.fields.items():
                 if isinstance(w, QtWidgets.QComboBox):
                     w.setEditText("")
@@ -357,7 +334,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     w.setText("")
             return
 
-        raw = path.read_text(encoding="utf-8")
+        raw = self._env_path.read_text(encoding="utf-8")
         data = _parse_env(raw)
         for key, w in self.fields.items():
             val = data.get(key, "")
@@ -369,14 +346,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     w.setEditText(val)
             else:
                 w.setText(val)
-        self.log.append(f"\U0001f4c4 Loaded {path.name} ({len(data)} keys)")
-        self.status.showMessage(f"Loaded {path.name}", 3000)
+        self.log.append(f"📄 Loaded {self._env_path.name} ({len(data)} keys)")
+        self._status_bar.showMessage(f"Loaded {self._env_path.name}", 3000)
 
     def _save_env(self) -> None:
-        path = PROFILES[self._current_profile]
-
-        if path.exists():
-            template = path.read_text(encoding="utf-8")
+        if self._env_path.exists():
+            template = self._env_path.read_text(encoding="utf-8")
         else:
             template = ""
 
@@ -388,14 +363,14 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 data[key] = w.text().strip()
 
         merged = _dump_env(data, template)
-        path.write_text(merged, encoding="utf-8")
-        self.log.append(f"\u2705 {path.name} saved")
-        self.status.showMessage(f"{path.name} saved", 3000)
+        self._env_path.write_text(merged, encoding="utf-8")
+        self.log.append(f"✅ {self._env_path.name} saved")
+        self._status_bar.showMessage(f"{self._env_path.name} saved", 3000)
 
     # ── Process control (non-blocking via QProcess) ──────────────────
     def _start_proxy(self) -> None:
         if self.qprocess.state() != QtCore.QProcess.ProcessState.NotRunning:
-            self.log.append("\u26a0 Proxy is already running")
+            self.log.append("⚠ Proxy is already running")
             return
 
         # Save before starting
@@ -412,9 +387,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
             "--port", port,
             "--timeout-graceful-shutdown", "5",
         ]
-        self.log.append(f"\U0001f680 Starting proxy server (profile: {self._current_profile})...")
+        self.log.append(f"🚀 Starting proxy server ({self._profile_name})...")
         self.log.append(f"   {uvicorn_path} {' '.join(args)}")
-        self.status.showMessage("Starting...")
+        self._status_bar.showMessage("Starting...")
 
         self.qprocess.setWorkingDirectory(str(BASE_DIR))
         self.qprocess.start(uvicorn_path, args)
@@ -425,7 +400,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
     def _stop_proxy(self) -> None:
         if self.qprocess.state() == QtCore.QProcess.ProcessState.NotRunning:
             return
-        self.log.append("\U0001f6d1 Stopping proxy server...")
+        self.log.append("🛑 Stopping proxy server...")
         self.qprocess.terminate()
         if not self.qprocess.waitForFinished(5000):
             self.qprocess.kill()
@@ -444,13 +419,51 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         status_str = "crashed" if exit_status == QtCore.QProcess.ExitStatus.CrashExit else "exited"
-        self.log.append(f"\u2705 Proxy {status_str} (code {exit_code})")
-        self.status.showMessage(f"Proxy {status_str}", 5000)
+        self.log.append(f"✅ Proxy {status_str} (code {exit_code})")
+        self._status_bar.showMessage(f"Proxy {status_str}", 5000)
 
-    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+    def cleanup(self) -> None:
+        """Terminate the running process if any."""
         if self.qprocess.state() != QtCore.QProcess.ProcessState.NotRunning:
             self.qprocess.terminate()
             self.qprocess.waitForFinished(3000)
+
+
+# ── Main Window ──────────────────────────────────────────────────────────
+class LauncherWindow(QtWidgets.QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("free-claude-code Launcher")
+        self.setMinimumSize(820, 680)
+        self.setStyleSheet(STYLESHEET)
+
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        central = QtWidgets.QWidget()
+        self.setCentralWidget(central)
+        layout = QtWidgets.QVBoxLayout(central)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(8)
+
+        # ── Tab widget with two independent server tabs ──
+        self.tabs = QtWidgets.QTabWidget()
+        layout.addWidget(self.tabs, stretch=1)
+
+        # Status bar (shared, passed to each tab for status messages)
+        self.status = self.statusBar()
+        self.status.showMessage("Ready")
+
+        # Create one tab per profile
+        self.tabs_list: list[ServerTab] = []
+        for profile_name in PROFILES:
+            tab = ServerTab(profile_name, self.status)
+            self.tabs.addTab(tab, profile_name)
+            self.tabs_list.append(tab)
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        for tab in self.tabs_list:
+            tab.cleanup()
         event.accept()
 
 
