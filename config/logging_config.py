@@ -82,6 +82,7 @@ def configure_logging(log_file: str, *, force: bool = False) -> None:
         encoding="utf-8",
         mode="a",
         rotation="50 MB",
+        enqueue=True,
     )
 
     # Intercept stdlib logging: route all root logger output to loguru

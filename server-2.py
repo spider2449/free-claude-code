@@ -11,8 +11,8 @@ import os
 os.environ["FCC_ENV_FILE"] = ".env-2"
 
 # Import settings FIRST to configure log file before importing app
-from config.settings import get_settings
 from config.logging_config import configure_logging
+from config.settings import get_settings
 
 settings = get_settings()
 # Override log file to be separated by server name
@@ -20,7 +20,7 @@ settings.log_file = "server2.log"
 # Reconfigure logging with the updated log file
 configure_logging(settings.log_file, force=True)
 
-from api.app import app, create_app
+from api.app import app, create_app  # noqa: E402
 
 __all__ = ["app", "create_app"]
 

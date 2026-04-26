@@ -10,9 +10,9 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
+from typing import cast
 
 from PySide6 import QtCore, QtGui, QtWidgets
-
 
 # ── Config ────────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent
@@ -145,7 +145,7 @@ def _dump_env(data: dict[str, str], template: str) -> str:
     seen: set[str] = set()
     out: list[str] = []
     for line in lines:
-        m = re.match(r'^([\w]+)=', line)
+        m = re.match(r"^([\w]+)=", line)
         if m and m.group(1) in data and m.group(1) not in seen:
             seen.add(m.group(1))
             out.append(_replace(m.group(1), data[m.group(1)]) + "\n")
@@ -210,7 +210,12 @@ FIELD_DEFS: list[tuple] = [
     ("ENABLE_NETWORK_PROBE_MOCK", "Mock Network Probe", "combo", BOOLEAN_CHOICES),
     ("ENABLE_TITLE_GENERATION_SKIP", "Skip Title Generation", "combo", BOOLEAN_CHOICES),
     ("ENABLE_SUGGESTION_MODE_SKIP", "Skip Suggestion Mode", "combo", BOOLEAN_CHOICES),
-    ("ENABLE_FILEPATH_EXTRACTION_MOCK", "Mock Filepath Extraction", "combo", BOOLEAN_CHOICES),
+    (
+        "ENABLE_FILEPATH_EXTRACTION_MOCK",
+        "Mock Filepath Extraction",
+        "combo",
+        BOOLEAN_CHOICES,
+    ),
     ("heading", "HTTP Timeouts"),
     ("HTTP_READ_TIMEOUT", "Read Timeout (s)", "line"),
     ("HTTP_WRITE_TIMEOUT", "Write Timeout (s)", "line"),
@@ -232,11 +237,13 @@ class ServerTab(QtWidgets.QWidget):
         self._env_path = PROFILES[profile_name]
         self._status_bar = status_bar
 
-        self.fields: dict[str, QtWidgets.QWidget] = {}
+        self.fields: dict[str, QtWidgets.QLineEdit | QtWidgets.QComboBox] = {}
 
         # Independent QProcess per tab
         self.qprocess = QtCore.QProcess(self)
-        self.qprocess.setProcessChannelMode(QtCore.QProcess.ProcessChannelMode.MergedChannels)
+        self.qprocess.setProcessChannelMode(
+            QtCore.QProcess.ProcessChannelMode.MergedChannels
+        )
         self.qprocess.readyReadStandardOutput.connect(self._on_stdout)
         self.qprocess.finished.connect(self._on_finished)
 
@@ -331,12 +338,12 @@ class ServerTab(QtWidgets.QWidget):
     # ── Env I/O ──────────────────────────────────────────────────────
     def _load_env(self) -> None:
         if not self._env_path.exists():
-            self.log.append(f"ℹ {self._env_path.name} not found, starting empty")
-            for key, w in self.fields.items():
+            self.log.append(f"Info: {self._env_path.name} not found, starting empty")
+            for w in self.fields.values():
                 if isinstance(w, QtWidgets.QComboBox):
                     w.setEditText("")
                 else:
-                    w.setText("")
+                    cast(QtWidgets.QLineEdit, w).setText("")
             return
 
         raw = self._env_path.read_text(encoding="utf-8")
@@ -350,7 +357,7 @@ class ServerTab(QtWidgets.QWidget):
                 else:
                     w.setEditText(val)
             else:
-                w.setText(val)
+                cast(QtWidgets.QLineEdit, w).setText(val)
         self.log.append(f"📄 Loaded {self._env_path.name} ({len(data)} keys)")
         self._status_bar.showMessage(f"Loaded {self._env_path.name}", 3000)
 
@@ -365,7 +372,7 @@ class ServerTab(QtWidgets.QWidget):
             if isinstance(w, QtWidgets.QComboBox):
                 data[key] = w.currentText().strip()
             else:
-                data[key] = w.text().strip()
+                data[key] = cast(QtWidgets.QLineEdit, w).text().strip()
 
         merged = _dump_env(data, template)
         self._env_path.write_text(merged, encoding="utf-8")
@@ -381,20 +388,34 @@ class ServerTab(QtWidgets.QWidget):
         # Save before starting
         self._save_env()
 
-        port = self.fields["PORT"].text().strip() if "PORT" in self.fields else "8083"
+        port = (
+            cast(QtWidgets.QLineEdit, self.fields["PORT"]).text().strip()
+            if "PORT" in self.fields
+            else "8083"
+        )
         if not port:
             port = "8083"
 
         uvicorn_path = str(Path(sys.executable).parent / "uvicorn.exe")
         args = [
             "server:app",
-            "--host", "0.0.0.0",
-            "--port", port,
-            "--timeout-graceful-shutdown", "5",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            port,
+            "--timeout-graceful-shutdown",
+            "5",
         ]
         self.log.append(f"🚀 Starting proxy server ({self._profile_name})...")
         self.log.append(f"   {uvicorn_path} {' '.join(args)}")
         self._status_bar.showMessage("Starting...")
+
+        # Set environment for this profile
+        env = QtCore.QProcessEnvironment.systemEnvironment()
+        env.insert("FCC_ENV_FILE", str(self._env_path))
+        log_file_name = f"server_{self._profile_name.replace(' ', '_').lower()}.log"
+        env.insert("LOG_FILE", log_file_name)
+        self.qprocess.setProcessEnvironment(env)
 
         self.qprocess.setWorkingDirectory(str(BASE_DIR))
         self.qprocess.start(uvicorn_path, args)
@@ -414,16 +435,30 @@ class ServerTab(QtWidgets.QWidget):
 
     def _on_stdout(self) -> None:
         data = self.qprocess.readAllStandardOutput()
-        text = bytes(data).decode("utf-8", errors="replace")
+        text = data.data().decode("utf-8", errors="replace")  # type: ignore
         for line in text.splitlines():
             self.log.append(line.rstrip())
         sb = self.log.verticalScrollBar()
         sb.setValue(sb.maximum())
 
-    def _on_finished(self, exit_code: int, exit_status: QtCore.QProcess.ExitStatus) -> None:
+    def _on_stderr(self) -> None:
+        data = self.qprocess.readAllStandardError()
+        text = data.data().decode("utf-8", errors="replace")  # type: ignore
+        for line in text.splitlines():
+            self.log.append(line.rstrip())
+        sb = self.log.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _on_finished(
+        self, exit_code: int, exit_status: QtCore.QProcess.ExitStatus
+    ) -> None:
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
-        status_str = "crashed" if exit_status == QtCore.QProcess.ExitStatus.CrashExit else "exited"
+        status_str = (
+            "crashed"
+            if exit_status == QtCore.QProcess.ExitStatus.CrashExit
+            else "exited"
+        )
         self.log.append(f"✅ Proxy {status_str} (code {exit_code})")
         self._status_bar.showMessage(f"Proxy {status_str}", 5000)
 
