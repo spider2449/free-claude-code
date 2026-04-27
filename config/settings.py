@@ -6,6 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from dotenv import dotenv_values
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -35,23 +36,33 @@ def _configured_env_files(model_config: Mapping[str, Any]) -> tuple[Path, ...]:
 
 def _env_file_contains_key(path: Path, key: str) -> bool:
     """Check whether a dotenv-style file defines the given key."""
+    return _env_file_value(path, key) is not None
+
+
+def _env_file_value(path: Path, key: str) -> str | None:
+    """Return a dotenv value when the file explicitly defines the key."""
     if not path.is_file():
-        return False
+        return None
 
     try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            if stripped.startswith("export "):
-                stripped = stripped[7:].lstrip()
-            name, sep, _value = stripped.partition("=")
-            if sep and name.strip() == key:
-                return True
+        values = dotenv_values(path)
     except OSError:
-        return False
+        return None
 
-    return False
+    if key not in values:
+        return None
+    value = values[key]
+    return "" if value is None else value
+
+
+def _env_file_override(model_config: Mapping[str, Any], key: str) -> str | None:
+    """Return the last configured dotenv value that explicitly defines a key."""
+    configured_value: str | None = None
+    for env_file in _configured_env_files(model_config):
+        value = _env_file_value(env_file, key)
+        if value is not None:
+            configured_value = value
+    return configured_value
 
 
 def _removed_env_var_message(model_config: Mapping[str, Any]) -> str | None:
@@ -112,7 +123,7 @@ class Settings(BaseSettings):
     # ==================== Model ====================
     # All Claude model requests are mapped to this single model (fallback)
     # Format: provider_type/model/name
-    model: str = "nvidia_nim/stepfun-ai/step-3.5-flash"
+    model: str = "nvidia_nim/z-ai/glm4.7"
 
     # Per-model overrides (optional, falls back to MODEL)
     # Each can use a different provider
@@ -210,6 +221,9 @@ class Settings(BaseSettings):
         "allowed_telegram_user_id",
         "discord_bot_token",
         "allowed_discord_channels",
+        "model_opus",
+        "model_sonnet",
+        "model_haiku",
         mode="before",
     )
     @classmethod
@@ -265,6 +279,20 @@ class Settings(BaseSettings):
                 "Set it in your .env file."
             )
         return self
+
+    @model_validator(mode="after")
+    def prefer_dotenv_anthropic_auth_token(self) -> Settings:
+        """Let explicit .env auth config override stale shell/client tokens."""
+        dotenv_value = _env_file_override(self.model_config, "ANTHROPIC_AUTH_TOKEN")
+        if dotenv_value is not None:
+            self.anthropic_auth_token = dotenv_value
+        return self
+
+    def uses_process_anthropic_auth_token(self) -> bool:
+        """Return whether proxy auth came from process env, not dotenv config."""
+        if _env_file_override(self.model_config, "ANTHROPIC_AUTH_TOKEN") is not None:
+            return False
+        return bool(os.environ.get("ANTHROPIC_AUTH_TOKEN"))
 
     @property
     def provider_type(self) -> str:
